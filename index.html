@@ -91,6 +91,7 @@ const SORTIE = 2000;                                      // carré final en pix
 const $ = s => document.querySelector(s);
 const items = [];
 let attente = Promise.resolve();
+let enAttente = 0;
 let modele = null;
 let moteur = "auto";   // passe à "cpu" si la carte graphique donne un masque inutilisable
 let info = "";
@@ -125,8 +126,17 @@ async function reduire(file, max = 2000) {
   const c = document.createElement("canvas");
   c.width = Math.round(bmp.width * k);
   c.height = Math.round(bmp.height * k);
-  c.getContext("2d").drawImage(bmp, 0, 0, c.width, c.height);
+  const g = c.getContext("2d");
+  g.imageSmoothingQuality = "high";
+  g.drawImage(bmp, 0, 0, c.width, c.height);
+  bmp.close?.();
   return c;
+}
+
+const viderCanvas = c => { c.width = c.height = 0; };   // libère la mémoire (important sur iPhone)
+
+async function libererModele() {
+  try { const m = await modele; modele = null; await m?.model?.dispose?.(); } catch (e) { console.warn(e); }
 }
 
 async function inferer(c) {
@@ -151,13 +161,14 @@ async function inferer(c) {
   setEtat(`${info} · masque ${mn.toFixed(2)}–${mx.toFixed(2)}`);
   const etendue = Math.max(mx - mn, 1e-6);
   const u8 = new Uint8ClampedArray(v.length);
-  for (let i = 0; i < v.length; i++) {
-    const a = (v[i] - mn) / etendue;
-    const s = Math.min(1, Math.max(0, (a - 0.2) / 0.6));   // bords plus nets
-    u8[i] = s * s * (3 - 2 * s) * 255;
-  }
+  for (let i = 0; i < v.length; i++) u8[i] = ((v[i] - mn) / etendue) * 255;   // masque doux à 512 px
   const m = await new RawImage(u8, p.dims.at(-1), p.dims.at(-2), 1).resize(c.width, c.height);
-  return m.data;
+  const a = m.data;
+  for (let i = 0; i < a.length; i++) {  // après l’agrandissement : seuil serré autour de 50 % = bords nets
+    const s = Math.min(1, Math.max(0, (a[i] - 96) / 64));
+    a[i] = s * s * (3 - 2 * s) * 255;
+  }
+  return a;
 }
 
 function boiteAlpha(a, w, h) {
@@ -168,32 +179,56 @@ function boiteAlpha(a, w, h) {
   return x1 >= x0 ? { x: x0, y: y0, w: x1 - x0 + 1, h: y1 - y0 + 1 } : null;
 }
 
-function nettoyer(a, w, h) {            // supprime les îlots isolés (< 3 % du plus gros morceau)
-  const n = w * h, lab = new Int32Array(n), pile = new Int32Array(n), tailles = [0];
+function nettoyer(a, w, h) {            // retire les îlots isolés ; calcul sur une grille 4× plus petite (peu de mémoire)
+  const f = 4, gw = Math.ceil(w / f), gh = Math.ceil(h / f), n = gw * gh;
+  const lab = new Int32Array(n), pile = new Int32Array(n), tailles = [0];
+  const g = new Uint8Array(n);          // une case est « allumée » si l’un de ses pixels est opaque
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) if (a[y * w + x] >= 128) g[(y >> 2) * gw + (x >> 2)] = 1;
+  const on = i => g[i] === 1;
   let nb = 0;
   for (let i = 0; i < n; i++) {
-    if (a[i] < 128 || lab[i]) continue;
+    if (lab[i] || !on(i)) continue;
     nb++; let sp = 0, taille = 0; pile[sp++] = i; lab[i] = nb;
     while (sp) {
       const j = pile[--sp]; taille++;
-      const x = j % w;
-      if (x > 0 && a[j - 1] >= 128 && !lab[j - 1]) { lab[j - 1] = nb; pile[sp++] = j - 1; }
-      if (x < w - 1 && a[j + 1] >= 128 && !lab[j + 1]) { lab[j + 1] = nb; pile[sp++] = j + 1; }
-      if (j >= w && a[j - w] >= 128 && !lab[j - w]) { lab[j - w] = nb; pile[sp++] = j - w; }
-      if (j < n - w && a[j + w] >= 128 && !lab[j + w]) { lab[j + w] = nb; pile[sp++] = j + w; }
+      const x = j % gw;
+      if (x > 0 && !lab[j - 1] && on(j - 1)) { lab[j - 1] = nb; pile[sp++] = j - 1; }
+      if (x < gw - 1 && !lab[j + 1] && on(j + 1)) { lab[j + 1] = nb; pile[sp++] = j + 1; }
+      if (j >= gw && !lab[j - gw] && on(j - gw)) { lab[j - gw] = nb; pile[sp++] = j - gw; }
+      if (j < n - gw && !lab[j + gw] && on(j + gw)) { lab[j + gw] = nb; pile[sp++] = j + gw; }
     }
     tailles[nb] = taille;
   }
   if (!nb) return;
   const seuil = Math.max(...tailles) * 0.03;
-  for (let i = 0; i < n; i++) if (lab[i] && tailles[lab[i]] < seuil) a[i] = 0;
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const i = y * w + x;
+    if (a[i]) { const l = lab[(y >> 2) * gw + (x >> 2)]; if (l && tailles[l] < seuil) a[i] = 0; }
+  }
+}
+
+function eroder(a, w, h) {              // rogne ~1 px au bord : enlève le liséré de l’ancien fond
+  const t = new Uint8ClampedArray(a.length);
+  for (let y = 0; y < h; y++) { const r = y * w;
+    for (let x = 0; x < w; x++) {
+      let m = a[r + x];
+      if (x > 0 && a[r + x - 1] < m) m = a[r + x - 1];
+      if (x < w - 1 && a[r + x + 1] < m) m = a[r + x + 1];
+      t[r + x] = m;
+    } }
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const i = y * w + x; let m = t[i];
+    if (y > 0 && t[i - w] < m) m = t[i - w];
+    if (y < h - 1 && t[i + w] < m) m = t[i + w];
+    a[i] = m;
+  }
 }
 
 async function detourer(file) {
   const c = await reduire(file);
   let a = await inferer(c);                         // passe 1 : image entière
   const b = boiteAlpha(a, c.width, c.height);
-  if (b && b.w > 64 && b.h > 64) {                  // passe 2 : on recadre sur l’appareil pour plus de précision
+  if (b && b.w > 64 && b.h > 64) {                  // passe 2 : recadrée sur l’appareil pour plus de précision
     const px = Math.round(b.w * 0.06), py = Math.round(b.h * 0.06);
     const x0 = Math.max(0, b.x - px), y0 = Math.max(0, b.y - py);
     const cw = Math.min(c.width, b.x + b.w + px) - x0, ch = Math.min(c.height, b.y + b.h + py) - y0;
@@ -202,10 +237,14 @@ async function detourer(file) {
     c2.getContext("2d").drawImage(c, x0, y0, cw, ch, 0, 0, cw, ch);
     setEtat("Affinage des contours…");
     const a2 = await inferer(c2);
+    viderCanvas(c2);
     a = new Uint8ClampedArray(c.width * c.height);
     for (let y = 0; y < ch; y++) a.set(a2.subarray(y * cw, (y + 1) * cw), (y0 + y) * c.width + x0);
   }
+  if (enAttente <= 1) await libererModele();       // dernière photo : on libère le modèle avant la suite
   nettoyer(a, c.width, c.height);
+  eroder(a, c.width, c.height);
+  c.boite = boiteAlpha(a, c.width, c.height) || { x: 0, y: 0, w: c.width, h: c.height };
   const ctx = c.getContext("2d");
   const d = ctx.getImageData(0, 0, c.width, c.height);
   for (let i = 0; i < a.length; i++) d.data[i * 4 + 3] = a[i];
@@ -227,6 +266,7 @@ function composer(item, o) {
   const S = SORTIE, out = document.createElement("canvas");
   out.width = out.height = S;
   const g = out.getContext("2d");
+  g.imageSmoothingQuality = "high";
   if (o.fond === "studio") {
     const gr = g.createRadialGradient(S * 0.5, S * 0.3, 0, S * 0.5, S * 0.3, S * 0.78);
     gr.addColorStop(0, "#eeeee9");
@@ -258,6 +298,7 @@ async function rendre(item) {
   const o = reglages(), transp = o.fond === "transparent";
   const out = composer(item, o);
   item.blob = await new Promise(r => out.toBlob(r, transp ? "image/png" : "image/jpeg", 0.92));
+  viderCanvas(out);
   item.ext = transp ? "png" : "jpg";
   if (item.url) URL.revokeObjectURL(item.url);
   item.url = URL.createObjectURL(item.blob);
@@ -265,11 +306,15 @@ async function rendre(item) {
 }
 
 async function traiter(file, item) {
+  try { await traiterInterne(file, item); } finally { enAttente--; }
+}
+
+async function traiterInterne(file, item) {
   if (item.retire) return;
   try {
     item.statut.textContent = "Détourage en cours…";
     item.cut = await detourer(file);
-    item.box = boite(item.cut);
+    item.box = item.cut.boite;
     await rendre(item);
     item.statut.remove();
     item.li.querySelector(".save").disabled = false;
@@ -296,6 +341,7 @@ function ajouter(fichiers) {
       items.splice(items.indexOf(item), 1);
       li.remove(); majTout();
     };
+    enAttente++;
     attente = attente.then(() => traiter(f, item));
   }
 }
@@ -306,14 +352,16 @@ async function enregistrer(liste) {
   const t = Date.now();
   const fichiers = liste.filter(i => i.blob).map((i, n) => new File([i.blob], `laptop-${t}-${n + 1}.${i.ext}`, { type: i.blob.type }));
   if (!fichiers.length) return;
-  if (navigator.canShare?.({ files: fichiers })) {
+  const mobile = /iPhone|iPad|Android/i.test(navigator.userAgent) || (navigator.maxTouchPoints > 1 && /Mac/.test(navigator.platform));
+  if (mobile && navigator.canShare?.({ files: fichiers })) {
     try { await navigator.share({ files: fichiers }); return; }
     catch (e) { if (e.name === "AbortError") return; }
   }
   for (const f of fichiers) {
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(f); a.download = f.name; a.click();
-    setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+    const u = URL.createObjectURL(f), a = document.createElement("a");
+    a.href = u; a.download = f.name; document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(u), 4000);
+    await new Promise(r => setTimeout(r, 300));
   }
 }
 
