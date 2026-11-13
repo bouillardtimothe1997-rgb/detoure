@@ -69,7 +69,7 @@ input[type=checkbox]{width:22px;height:22px;accent-color:var(--accent)}
 <script type="module">
 import { AutoModel, AutoProcessor, RawImage } from "https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.7.0";
 
-const MODEL_ID = "onnx-community/BiRefNet_512x512-ONNX"; // à remplacer ici pour tester un autre modèle
+const MODEL_ID = "studioludens/birefnet-lite-512"; // BiRefNet léger (≈94 Mo en fp16) ; à remplacer ici pour tester un autre modèle
 const SORTIE = 2000;                                      // carré final en pixels
 
 const $ = s => document.querySelector(s);
@@ -84,14 +84,18 @@ function charger() {
   if (!modele) modele = (async () => {
     setEtat("Chargement du modèle…");
     const progress_callback = p => { if (p.status === "progress") setEtat(`Modèle ${Math.round(p.progress)} %`); };
-    let model;
-    try {
-      if (!navigator.gpu) throw new Error("pas de WebGPU");
-      model = await AutoModel.from_pretrained(MODEL_ID, { device: "webgpu", dtype: "fp32", progress_callback });
-    } catch (e) {
-      console.warn("WebGPU indisponible, retour au processeur", e);
-      model = await AutoModel.from_pretrained(MODEL_ID, { dtype: "fp32", progress_callback });
+    const essais = [
+      { device: "webgpu", dtype: "fp16" },
+      { device: "webgpu", dtype: "fp32" },
+      { device: "wasm", dtype: "fp32" }
+    ];
+    let model, dernier;
+    for (const o of essais) {
+      if (o.device === "webgpu" && !navigator.gpu) continue;
+      try { model = await AutoModel.from_pretrained(MODEL_ID, { ...o, progress_callback }); break; }
+      catch (e) { dernier = e; console.warn("Échec du chargement", o, e); }
     }
+    if (!model) throw dernier || new Error("Aucun moteur disponible");
     const processor = await AutoProcessor.from_pretrained(MODEL_ID);
     setEtat("Modèle prêt");
     return { model, processor };
