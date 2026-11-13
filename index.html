@@ -3,16 +3,21 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="theme-color" content="#0b7a75">
+<meta name="theme-color" content="#0a1a4a">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Econext">
+<link rel="apple-touch-icon" href="icon-180.png">
 <link rel="manifest" href="manifest.webmanifest">
-<link rel="icon" href="icon.svg">
-<title>Détoure – photos produit</title>
+<link rel="icon" type="image/png" href="icon-192.png">
+<title>Econext – Studio photo</title>
 <style>
-:root{--bg:#e9edf0;--surf:#fff;--encre:#14202b;--doux:#5b6874;--accent:#0b7a75;--sur-accent:#fff;--ligne:#cfd6dc;--err:#b3261e;color-scheme:light}
-@media (prefers-color-scheme:dark){:root{--bg:#10171d;--surf:#1a232b;--encre:#e8edf1;--doux:#9aa8b3;--accent:#3fc1b9;--sur-accent:#08201f;--ligne:#2c3944;--err:#ff8a80;color-scheme:dark}}
+:root{--bg:#e9edf0;--surf:#fff;--encre:#14202b;--doux:#5b6874;--accent:#0a74b8;--sur-accent:#fff;--marine:#0a1a4a;--ligne:#cfd6dc;--err:#b3261e;color-scheme:light}
+@media (prefers-color-scheme:dark){:root{--bg:#10171d;--surf:#1a232b;--encre:#e8edf1;--doux:#9aa8b3;--accent:#4aa8e8;--sur-accent:#06142f;--marine:#0a1a4a;--ligne:#2c3944;--err:#ff8a80;color-scheme:dark}}
 *{box-sizing:border-box}
 html,body{margin:0}
-body{background:var(--bg);color:var(--encre);font:16px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;padding:env(safe-area-inset-top) 0 env(safe-area-inset-bottom)}
+body{background:var(--bg);color:var(--encre);font:16px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;padding:0 0 env(safe-area-inset-bottom)}
 main{max-width:560px;margin:0 auto;padding:16px}
 header{display:flex;align-items:baseline;justify-content:space-between;gap:12px;margin-bottom:16px}
 h1{margin:0;font-size:1.6rem;font-weight:800;letter-spacing:-.03em}
@@ -38,27 +43,38 @@ input[type=checkbox]{width:22px;height:22px;accent-color:var(--accent)}
 #tout{margin-top:16px}
 #tout[hidden]{display:none}
 .note{color:var(--doux);font-size:.85rem;margin:16px 0 0}
+.marque{display:flex;align-items:center;gap:14px;background:var(--marine);color:#fff;margin:-16px -16px 18px;padding:calc(env(safe-area-inset-top) + 12px) 16px 14px;border-radius:0 0 22px 22px;box-shadow:0 10px 24px -14px rgba(10,26,74,.7)}
+.marque img{height:46px;width:auto;max-width:60%;object-fit:contain;display:block}
+.mot{font-size:1.7rem;font-weight:800;letter-spacing:-.04em;color:#fff}
+.titre{display:flex;flex-direction:column;line-height:1.2;margin-left:auto;text-align:right}
+.titre strong{font-size:1rem}
+.titre #etat{color:#9db3d6;font-size:.78rem}
+.btn.principal svg{flex:none}
 </style>
 </head>
 <body>
 <main>
-  <header><h1>Détoure</h1><span id="etat"></span></header>
+  <header class="marque">
+    <img id="logo" src="logo.png" alt="Econext" onerror="this.replaceWith(Object.assign(document.createElement('span'),{className:'mot',textContent:'Econext'}))">
+    <div class="titre"><strong>Studio photo</strong><span id="etat">Prêt à détourer</span></div>
+  </header>
 
   <section class="capture">
-    <label class="btn principal">Prendre une photo<input id="cam" type="file" accept="image/*" capture="environment" hidden></label>
+    <label class="btn principal"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></svg>&nbsp;Prendre une photo<input id="cam" type="file" accept="image/*" capture="environment" hidden></label>
     <label class="btn">Choisir des photos<input id="pick" type="file" accept="image/*" multiple hidden></label>
   </section>
 
   <section class="reglages" aria-label="Réglages">
     <label>Fond
       <select id="fond">
+        <option value="studio">Studio Econext (gris dégradé)</option>
         <option value="#ffffff">Blanc</option>
         <option value="#f1f2f4">Gris pâle</option>
         <option value="transparent">Transparent (PNG)</option>
       </select>
     </label>
     <label>Ombre sous l’appareil <input id="ombre" type="checkbox" checked></label>
-    <label>Marge <input id="marge" type="range" min="2" max="25" value="8"></label>
+    <label>Marge <input id="marge" type="range" min="2" max="25" value="5"></label>
   </section>
 
   <ul id="liste"></ul>
@@ -113,8 +129,7 @@ async function reduire(file, max = 2000) {
   return c;
 }
 
-async function detourer(file) {
-  const c = await reduire(file);
+async function inferer(c) {
   const blob = await new Promise(r => c.toBlob(r, "image/jpeg", 0.95));
   const { model, processor } = await charger();
   const image = await RawImage.fromBlob(blob);
@@ -125,23 +140,75 @@ async function detourer(file) {
   const v = p.data;
   let mn = Infinity, mx = -Infinity;
   for (let i = 0; i < v.length; i++) { const x = v[i]; if (x < mn) mn = x; if (x > mx) mx = x; }
-  const largeur = p.dims.at(-1), hauteur = p.dims.at(-2);
   if (!(Number.isFinite(mn) && Number.isFinite(mx)) || mx - mn < 0.25) {
     if (moteur !== "cpu") {            // masque plat ou invalide : on recommence sur le processeur
       console.warn("Masque inutilisable", mn, mx, "→ repli sur le processeur");
       moteur = "cpu"; modele = null;
-      return detourer(file);
+      return inferer(c);
     }
     if (!Number.isFinite(mn) || !Number.isFinite(mx)) throw new Error("sortie du modèle invalide");
   }
   setEtat(`${info} · masque ${mn.toFixed(2)}–${mx.toFixed(2)}`);
   const etendue = Math.max(mx - mn, 1e-6);
   const u8 = new Uint8ClampedArray(v.length);
-  for (let i = 0; i < v.length; i++) { const a = (v[i] - mn) / etendue; u8[i] = a * a * (3 - 2 * a) * 255; }
-  const m = await new RawImage(u8, largeur, hauteur, 1).resize(c.width, c.height);
+  for (let i = 0; i < v.length; i++) {
+    const a = (v[i] - mn) / etendue;
+    const s = Math.min(1, Math.max(0, (a - 0.2) / 0.6));   // bords plus nets
+    u8[i] = s * s * (3 - 2 * s) * 255;
+  }
+  const m = await new RawImage(u8, p.dims.at(-1), p.dims.at(-2), 1).resize(c.width, c.height);
+  return m.data;
+}
+
+function boiteAlpha(a, w, h) {
+  let x0 = w, y0 = h, x1 = -1, y1 = -1;
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    if (a[y * w + x] > 128) { if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
+  }
+  return x1 >= x0 ? { x: x0, y: y0, w: x1 - x0 + 1, h: y1 - y0 + 1 } : null;
+}
+
+function nettoyer(a, w, h) {            // supprime les îlots isolés (< 3 % du plus gros morceau)
+  const n = w * h, lab = new Int32Array(n), pile = new Int32Array(n), tailles = [0];
+  let nb = 0;
+  for (let i = 0; i < n; i++) {
+    if (a[i] < 128 || lab[i]) continue;
+    nb++; let sp = 0, taille = 0; pile[sp++] = i; lab[i] = nb;
+    while (sp) {
+      const j = pile[--sp]; taille++;
+      const x = j % w;
+      if (x > 0 && a[j - 1] >= 128 && !lab[j - 1]) { lab[j - 1] = nb; pile[sp++] = j - 1; }
+      if (x < w - 1 && a[j + 1] >= 128 && !lab[j + 1]) { lab[j + 1] = nb; pile[sp++] = j + 1; }
+      if (j >= w && a[j - w] >= 128 && !lab[j - w]) { lab[j - w] = nb; pile[sp++] = j - w; }
+      if (j < n - w && a[j + w] >= 128 && !lab[j + w]) { lab[j + w] = nb; pile[sp++] = j + w; }
+    }
+    tailles[nb] = taille;
+  }
+  if (!nb) return;
+  const seuil = Math.max(...tailles) * 0.03;
+  for (let i = 0; i < n; i++) if (lab[i] && tailles[lab[i]] < seuil) a[i] = 0;
+}
+
+async function detourer(file) {
+  const c = await reduire(file);
+  let a = await inferer(c);                         // passe 1 : image entière
+  const b = boiteAlpha(a, c.width, c.height);
+  if (b && b.w > 64 && b.h > 64) {                  // passe 2 : on recadre sur l’appareil pour plus de précision
+    const px = Math.round(b.w * 0.06), py = Math.round(b.h * 0.06);
+    const x0 = Math.max(0, b.x - px), y0 = Math.max(0, b.y - py);
+    const cw = Math.min(c.width, b.x + b.w + px) - x0, ch = Math.min(c.height, b.y + b.h + py) - y0;
+    const c2 = document.createElement("canvas");
+    c2.width = cw; c2.height = ch;
+    c2.getContext("2d").drawImage(c, x0, y0, cw, ch, 0, 0, cw, ch);
+    setEtat("Affinage des contours…");
+    const a2 = await inferer(c2);
+    a = new Uint8ClampedArray(c.width * c.height);
+    for (let y = 0; y < ch; y++) a.set(a2.subarray(y * cw, (y + 1) * cw), (y0 + y) * c.width + x0);
+  }
+  nettoyer(a, c.width, c.height);
   const ctx = c.getContext("2d");
   const d = ctx.getImageData(0, 0, c.width, c.height);
-  for (let i = 0; i < m.data.length; i++) d.data[i * 4 + 3] = m.data[i];
+  for (let i = 0; i < a.length; i++) d.data[i * 4 + 3] = a[i];
   ctx.putImageData(d, 0, 0);
   return c;
 }
@@ -160,7 +227,12 @@ function composer(item, o) {
   const S = SORTIE, out = document.createElement("canvas");
   out.width = out.height = S;
   const g = out.getContext("2d");
-  if (o.fond !== "transparent") { g.fillStyle = o.fond; g.fillRect(0, 0, S, S); }
+  if (o.fond === "studio") {
+    const gr = g.createRadialGradient(S * 0.5, S * 0.3, 0, S * 0.5, S * 0.3, S * 0.78);
+    gr.addColorStop(0, "#eeeee9");
+    gr.addColorStop(1, "#d4d4d2");
+    g.fillStyle = gr; g.fillRect(0, 0, S, S);
+  } else if (o.fond !== "transparent") { g.fillStyle = o.fond; g.fillRect(0, 0, S, S); }
   const { x, y, w, h } = item.box;
   const dispo = S * (1 - 2 * o.marge);
   const k = Math.min(dispo / w, dispo / h);
@@ -169,10 +241,10 @@ function composer(item, o) {
   if (o.ombre) {
     g.save();
     g.translate(S / 2, dy + dh);
-    g.scale(1, 0.1);
-    const r = dw * 0.55;
+    g.scale(1, 0.07);
+    const r = dw * 0.6;
     const gr = g.createRadialGradient(0, 0, 0, 0, 0, r);
-    gr.addColorStop(0, "rgba(0,0,0,.35)");
+    gr.addColorStop(0, "rgba(0,0,0,.3)");
     gr.addColorStop(1, "rgba(0,0,0,0)");
     g.fillStyle = gr;
     g.beginPath(); g.arc(0, 0, r, 0, Math.PI * 2); g.fill();
