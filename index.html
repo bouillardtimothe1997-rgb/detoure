@@ -1,0 +1,238 @@
+<!doctype html>
+<html lang="fr-CA">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0b7a75">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon.svg">
+<title>Détoure – photos produit</title>
+<style>
+:root{--bg:#e9edf0;--surf:#fff;--encre:#14202b;--doux:#5b6874;--accent:#0b7a75;--sur-accent:#fff;--ligne:#cfd6dc;--err:#b3261e;color-scheme:light}
+@media (prefers-color-scheme:dark){:root{--bg:#10171d;--surf:#1a232b;--encre:#e8edf1;--doux:#9aa8b3;--accent:#3fc1b9;--sur-accent:#08201f;--ligne:#2c3944;--err:#ff8a80;color-scheme:dark}}
+*{box-sizing:border-box}
+html,body{margin:0}
+body{background:var(--bg);color:var(--encre);font:16px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;padding:env(safe-area-inset-top) 0 env(safe-area-inset-bottom)}
+main{max-width:560px;margin:0 auto;padding:16px}
+header{display:flex;align-items:baseline;justify-content:space-between;gap:12px;margin-bottom:16px}
+h1{margin:0;font-size:1.6rem;font-weight:800;letter-spacing:-.03em}
+#etat{font-size:.85rem;color:var(--doux)}
+.btn{display:flex;align-items:center;justify-content:center;min-height:52px;border-radius:14px;border:2px solid var(--accent);color:var(--accent);background:transparent;font:inherit;font-weight:650;cursor:pointer;width:100%;padding:0 16px}
+.btn.principal{min-height:68px;font-size:1.15rem;background:var(--accent);color:var(--sur-accent)}
+.btn:focus-visible,select:focus-visible,input:focus-visible{outline:3px solid var(--encre);outline-offset:2px}
+.capture{display:grid;gap:10px}
+.reglages{background:var(--surf);border:1px solid var(--ligne);border-radius:14px;padding:12px 14px;margin:16px 0;display:grid;gap:10px}
+.reglages label{display:flex;align-items:center;justify-content:space-between;gap:12px;font-size:.95rem}
+select{font:inherit;padding:6px 8px;border-radius:8px;border:1px solid var(--ligne);background:var(--bg);color:var(--encre)}
+input[type=range]{width:50%;accent-color:var(--accent)}
+input[type=checkbox]{width:22px;height:22px;accent-color:var(--accent)}
+#liste{list-style:none;margin:0;padding:0;display:grid;gap:16px}
+.plateau{position:relative;aspect-ratio:1;background:#fff;border-radius:14px;overflow:hidden;box-shadow:0 1px 0 var(--ligne),0 10px 28px -14px rgba(20,32,43,.45)}
+.plateau img{width:100%;height:100%;object-fit:contain;display:block}
+.statut{position:absolute;inset:0;margin:0;display:grid;place-items:center;color:#5b6874;font-weight:600;text-align:center;padding:16px}
+.statut.err{color:#b3261e}
+.actions{display:grid;grid-template-columns:2fr 1fr;gap:8px;margin-top:8px}
+.actions .btn{min-height:46px}
+.actions .del{border-color:var(--ligne);color:var(--doux)}
+.actions .btn:disabled{opacity:.45}
+#tout{margin-top:16px}
+#tout[hidden]{display:none}
+.note{color:var(--doux);font-size:.85rem;margin:16px 0 0}
+</style>
+</head>
+<body>
+<main>
+  <header><h1>Détoure</h1><span id="etat"></span></header>
+
+  <section class="capture">
+    <label class="btn principal">Prendre une photo<input id="cam" type="file" accept="image/*" capture="environment" hidden></label>
+    <label class="btn">Choisir des photos<input id="pick" type="file" accept="image/*" multiple hidden></label>
+  </section>
+
+  <section class="reglages" aria-label="Réglages">
+    <label>Fond
+      <select id="fond">
+        <option value="#ffffff">Blanc</option>
+        <option value="#f1f2f4">Gris pâle</option>
+        <option value="transparent">Transparent (PNG)</option>
+      </select>
+    </label>
+    <label>Ombre sous l’appareil <input id="ombre" type="checkbox" checked></label>
+    <label>Marge <input id="marge" type="range" min="2" max="25" value="8"></label>
+  </section>
+
+  <ul id="liste"></ul>
+  <button id="tout" class="btn" hidden>Tout enregistrer</button>
+  <p class="note">Tout se passe dans ton téléphone : les photos ne sont envoyées nulle part. Le premier détourage télécharge le modèle (une seule fois).</p>
+</main>
+
+<script type="module">
+import { AutoModel, AutoProcessor, RawImage } from "https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.7.0";
+
+const MODEL_ID = "onnx-community/BiRefNet_512x512-ONNX"; // à remplacer ici pour tester un autre modèle
+const SORTIE = 2000;                                      // carré final en pixels
+
+const $ = s => document.querySelector(s);
+const items = [];
+let attente = Promise.resolve();
+let modele = null;
+
+const setEtat = t => { $("#etat").textContent = t; };
+const reglages = () => ({ fond: $("#fond").value, ombre: $("#ombre").checked, marge: +$("#marge").value / 100 });
+
+function charger() {
+  if (!modele) modele = (async () => {
+    setEtat("Chargement du modèle…");
+    const progress_callback = p => { if (p.status === "progress") setEtat(`Modèle ${Math.round(p.progress)} %`); };
+    let model;
+    try {
+      if (!navigator.gpu) throw new Error("pas de WebGPU");
+      model = await AutoModel.from_pretrained(MODEL_ID, { device: "webgpu", dtype: "fp32", progress_callback });
+    } catch (e) {
+      console.warn("WebGPU indisponible, retour au processeur", e);
+      model = await AutoModel.from_pretrained(MODEL_ID, { dtype: "fp32", progress_callback });
+    }
+    const processor = await AutoProcessor.from_pretrained(MODEL_ID);
+    setEtat("Modèle prêt");
+    return { model, processor };
+  })().catch(e => { modele = null; setEtat(""); throw e; });
+  return modele;
+}
+
+async function reduire(file, max = 2000) {
+  const bmp = await createImageBitmap(file);
+  const k = Math.min(1, max / Math.max(bmp.width, bmp.height));
+  const c = document.createElement("canvas");
+  c.width = Math.round(bmp.width * k);
+  c.height = Math.round(bmp.height * k);
+  c.getContext("2d").drawImage(bmp, 0, 0, c.width, c.height);
+  return c;
+}
+
+async function detourer(file) {
+  const c = await reduire(file);
+  const blob = await new Promise(r => c.toBlob(r, "image/jpeg", 0.95));
+  const { model, processor } = await charger();
+  const image = await RawImage.fromBlob(blob);
+  const { pixel_values } = await processor(image);
+  const sortie = await model({ input_image: pixel_values });
+  const t = sortie.output_image ?? Object.values(sortie)[0];
+  const m = await RawImage.fromTensor(t[0].sigmoid().mul(255).to("uint8")).resize(c.width, c.height);
+  const ctx = c.getContext("2d");
+  const d = ctx.getImageData(0, 0, c.width, c.height);
+  for (let i = 0; i < m.data.length; i++) d.data[i * 4 + 3] = m.data[i];
+  ctx.putImageData(d, 0, 0);
+  return c;
+}
+
+function boite(c) {
+  const { width: w, height: h } = c;
+  const a = c.getContext("2d").getImageData(0, 0, w, h).data;
+  let x0 = w, y0 = h, x1 = -1, y1 = -1;
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    if (a[(y * w + x) * 4 + 3] > 24) { if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
+  }
+  return x1 >= x0 ? { x: x0, y: y0, w: x1 - x0 + 1, h: y1 - y0 + 1 } : { x: 0, y: 0, w, h };
+}
+
+function composer(item, o) {
+  const S = SORTIE, out = document.createElement("canvas");
+  out.width = out.height = S;
+  const g = out.getContext("2d");
+  if (o.fond !== "transparent") { g.fillStyle = o.fond; g.fillRect(0, 0, S, S); }
+  const { x, y, w, h } = item.box;
+  const dispo = S * (1 - 2 * o.marge);
+  const k = Math.min(dispo / w, dispo / h);
+  const dw = w * k, dh = h * k;
+  const dx = (S - dw) / 2, dy = (S - dh) / 2 - (o.ombre ? S * 0.01 : 0);
+  if (o.ombre) {
+    g.save();
+    g.translate(S / 2, dy + dh);
+    g.scale(1, 0.1);
+    const r = dw * 0.55;
+    const gr = g.createRadialGradient(0, 0, 0, 0, 0, r);
+    gr.addColorStop(0, "rgba(0,0,0,.35)");
+    gr.addColorStop(1, "rgba(0,0,0,0)");
+    g.fillStyle = gr;
+    g.beginPath(); g.arc(0, 0, r, 0, Math.PI * 2); g.fill();
+    g.restore();
+  }
+  g.drawImage(item.cut, x, y, w, h, dx, dy, dw, dh);
+  return out;
+}
+
+async function rendre(item) {
+  const o = reglages(), transp = o.fond === "transparent";
+  const out = composer(item, o);
+  item.blob = await new Promise(r => out.toBlob(r, transp ? "image/png" : "image/jpeg", 0.92));
+  item.ext = transp ? "png" : "jpg";
+  if (item.url) URL.revokeObjectURL(item.url);
+  item.url = URL.createObjectURL(item.blob);
+  item.img.src = item.url;
+}
+
+async function traiter(file, item) {
+  if (item.retire) return;
+  try {
+    item.statut.textContent = "Détourage en cours…";
+    item.cut = await detourer(file);
+    item.box = boite(item.cut);
+    await rendre(item);
+    item.statut.remove();
+    item.li.querySelector(".save").disabled = false;
+    majTout();
+  } catch (e) {
+    console.error(e);
+    item.statut.classList.add("err");
+    item.statut.textContent = "Le détourage a échoué. Recharge la page ou essaie une autre photo.";
+  }
+}
+
+function ajouter(fichiers) {
+  for (const f of fichiers) {
+    const li = document.createElement("li");
+    li.innerHTML = `<div class="plateau"><img alt="Photo détourée"><p class="statut">En attente…</p></div>
+      <div class="actions"><button class="btn save" disabled>Enregistrer</button><button class="btn del">Retirer</button></div>`;
+    $("#liste").prepend(li);
+    const item = { li, img: li.querySelector("img"), statut: li.querySelector(".statut") };
+    items.push(item);
+    li.querySelector(".save").onclick = () => enregistrer([item]);
+    li.querySelector(".del").onclick = () => {
+      item.retire = true;
+      if (item.url) URL.revokeObjectURL(item.url);
+      items.splice(items.indexOf(item), 1);
+      li.remove(); majTout();
+    };
+    attente = attente.then(() => traiter(f, item));
+  }
+}
+
+function majTout() { $("#tout").hidden = items.filter(i => i.blob).length < 2; }
+
+async function enregistrer(liste) {
+  const t = Date.now();
+  const fichiers = liste.filter(i => i.blob).map((i, n) => new File([i.blob], `laptop-${t}-${n + 1}.${i.ext}`, { type: i.blob.type }));
+  if (!fichiers.length) return;
+  if (navigator.canShare?.({ files: fichiers })) {
+    try { await navigator.share({ files: fichiers }); return; }
+    catch (e) { if (e.name === "AbortError") return; }
+  }
+  for (const f of fichiers) {
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(f); a.download = f.name; a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+  }
+}
+
+for (const id of ["#cam", "#pick"]) {
+  $(id).addEventListener("change", e => { const f = [...e.target.files]; e.target.value = ""; ajouter(f); });
+}
+for (const id of ["#fond", "#ombre", "#marge"]) {
+  $(id).addEventListener("change", () => items.forEach(i => i.cut && rendre(i)));
+}
+$("#tout").onclick = () => enregistrer(items.slice().reverse());
+
+if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
+</script>
+</body>
+</html>
