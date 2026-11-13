@@ -76,6 +76,8 @@ const $ = s => document.querySelector(s);
 const items = [];
 let attente = Promise.resolve();
 let modele = null;
+let moteur = "auto";   // passe à "cpu" si la carte graphique donne un masque inutilisable
+let info = "";
 
 const setEtat = t => { $("#etat").textContent = t; };
 const reglages = () => ({ fond: $("#fond").value, ombre: $("#ombre").checked, marge: +$("#marge").value / 100 });
@@ -84,20 +86,18 @@ function charger() {
   if (!modele) modele = (async () => {
     setEtat("Chargement du modèle…");
     const progress_callback = p => { if (p.status === "progress") setEtat(`Modèle ${Math.round(p.progress)} %`); };
-    const essais = [
-      { device: "webgpu", dtype: "fp16" },
-      { device: "webgpu", dtype: "fp32" },
-      { device: "wasm", dtype: "fp32" }
-    ];
+    const essais = moteur === "cpu"
+      ? [{ device: "wasm", dtype: "fp32" }]
+      : [{ device: "webgpu", dtype: "fp16" }, { device: "webgpu", dtype: "fp32" }, { device: "wasm", dtype: "fp32" }];
     let model, dernier;
     for (const o of essais) {
       if (o.device === "webgpu" && !navigator.gpu) continue;
-      try { model = await AutoModel.from_pretrained(MODEL_ID, { ...o, progress_callback }); break; }
+      try { model = await AutoModel.from_pretrained(MODEL_ID, { ...o, progress_callback }); info = `${o.device} ${o.dtype}`; break; }
       catch (e) { dernier = e; console.warn("Échec du chargement", o, e); }
     }
     if (!model) throw dernier || new Error("Aucun moteur disponible");
     const processor = await AutoProcessor.from_pretrained(MODEL_ID);
-    setEtat("Modèle prêt");
+    setEtat(`Modèle prêt (${info})`);
     return { model, processor };
   })().catch(e => { modele = null; setEtat(""); throw e; });
   return modele;
@@ -121,7 +121,24 @@ async function detourer(file) {
   const { pixel_values } = await processor(image);
   const sortie = await model({ input_image: pixel_values });
   const t = sortie.output_image ?? Object.values(sortie)[0];
-  const m = await RawImage.fromTensor(t[0].sigmoid().mul(255).to("uint8")).resize(c.width, c.height);
+  const p = t[0].sigmoid();
+  const v = p.data;
+  let mn = Infinity, mx = -Infinity;
+  for (let i = 0; i < v.length; i++) { const x = v[i]; if (x < mn) mn = x; if (x > mx) mx = x; }
+  const largeur = p.dims.at(-1), hauteur = p.dims.at(-2);
+  if (!(Number.isFinite(mn) && Number.isFinite(mx)) || mx - mn < 0.25) {
+    if (moteur !== "cpu") {            // masque plat ou invalide : on recommence sur le processeur
+      console.warn("Masque inutilisable", mn, mx, "→ repli sur le processeur");
+      moteur = "cpu"; modele = null;
+      return detourer(file);
+    }
+    if (!Number.isFinite(mn) || !Number.isFinite(mx)) throw new Error("sortie du modèle invalide");
+  }
+  setEtat(`${info} · masque ${mn.toFixed(2)}–${mx.toFixed(2)}`);
+  const etendue = Math.max(mx - mn, 1e-6);
+  const u8 = new Uint8ClampedArray(v.length);
+  for (let i = 0; i < v.length; i++) { const a = (v[i] - mn) / etendue; u8[i] = a * a * (3 - 2 * a) * 255; }
+  const m = await new RawImage(u8, largeur, hauteur, 1).resize(c.width, c.height);
   const ctx = c.getContext("2d");
   const d = ctx.getImageData(0, 0, c.width, c.height);
   for (let i = 0; i < m.data.length; i++) d.data[i * 4 + 3] = m.data[i];
@@ -188,7 +205,7 @@ async function traiter(file, item) {
   } catch (e) {
     console.error(e);
     item.statut.classList.add("err");
-    item.statut.textContent = "Le détourage a échoué. Recharge la page ou essaie une autre photo.";
+    item.statut.textContent = "Le détourage a échoué" + (e && e.message ? " (" + e.message + ")" : "") + ". Recharge la page ou essaie une autre photo.";
   }
 }
 
